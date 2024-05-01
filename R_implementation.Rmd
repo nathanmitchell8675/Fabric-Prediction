@@ -414,114 +414,17 @@ kable(lasso_table, booktabs = T) %>%
   kable_styling(bootstrap_options = "striped", full_width = F)
 ```
 
-Now, we will move on to Principal Components Analysis.
-
-```{r pcr prod 1}
-tune_df <- data.frame(M = seq_len(ncol(weaving_train) - 1))
-
-prod_recipe_pca <- prod_recipe |>
-  step_pca(all_predictors(), num_comp = tune::tune("M"))
-
-linear_spec <- linear_reg()
-
-pca_workflow <- workflow() |>
-  add_model(linear_spec) |>
-  add_recipe(prod_recipe_pca)
-
-pca_tune <- pca_workflow |>
-  tune_grid(resamples = weaving_cv, grid = tune_df)
-
-pca_tune |>
-  collect_metrics() |>
-  dplyr::select(M, .metric, mean) |>
-  pivot_wider(names_from = .metric, values_from = mean) |>
-  ggplot() +
-  geom_line(aes(M, rmse^2)) +
-  geom_point(aes(M, rmse^2)) +
-  labs(x="M", y="MSE", title="PCR: MSE vs Number of Components") +
-  theme_light()
-```
-
-```{r pcr prod 2}
-show_best(pca_tune, metric = "rmse", n = 1) %>%
-  dplyr::select(-c(.estimator, .config)) %>%
-  kable(col.names=c("M","Metric","Mean","n","SE"))
-
-# Manually select 8 as the number of principal components to be used
-x <- select_best(pca_tune, metric="rmse")
-x[,1] <- 8
-pca_final <- finalize_workflow(pca_workflow, x)
-pca_final_fit <- fit(pca_final, data = weaving_train)
-
-pred <- predict(pca_final_fit, new_data = weaving_test)
-
-pca_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Total_Pdn_yds))
-
-pca_metrics <-  method_metrics(pca_residuals, truth=Total_Pdn_yds, estimate=.pred) %>%
-  dplyr::select(-.estimator)
-
-pca_prod_rmse <- pca_metrics$.estimate[1]
-pca_prod_rmse_std <- pca_prod_rmse/sd(weaving_test$Total_Pdn_yds)
-```
-
-```{r pcr rej 1}
-tune_df <- data.frame(M = seq_len(ncol(weaving_train) - 1))
-
-rej_recipe_pca <- rej_recipe |>
-  step_pca(all_predictors(), num_comp = tune::tune("M"))
-
-pca_workflow <- workflow() |>
-  add_model(linear_spec) |>
-  add_recipe(rej_recipe_pca)
-
-pca_tune <- pca_workflow |>
-  tune_grid(resamples = weaving_cv, grid = tune_df)
-
-pca_tune |>
-  collect_metrics() |>
-  dplyr::select(M, .metric, mean) |>
-  pivot_wider(names_from = .metric, values_from = mean) |>
-  ggplot() +
-  geom_line(aes(M, rmse^2)) +
-  geom_point(aes(M, rmse^2)) +
-  labs(x="M", y="MSE", title="PCR: MSE vs Number of Components") +
-  theme_light()
-```
-
-```{r pcr rej 2}
-show_best(pca_tune, metric = "rmse", n = 1) %>%
-  dplyr::select(-c(.estimator, .config)) %>%
-  kable(col.names=c("M","Metric","Mean","n","SE"))
-
-x <- select_best(pca_tune, metric="rmse")
-x[,1] <- 10
-pca_final <- finalize_workflow(pca_workflow, x)
-pca_final_fit <- fit(pca_final, data = weaving_train)
-
-pred <- predict(pca_final_fit, new_data = weaving_test)
-
-pca_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Rejection))
-
-pca_metrics <-  method_metrics(pca_residuals, truth=Rejection, estimate=.pred) %>%
-  dplyr::select(-.estimator)
-
-pca_rej_rmse <- pca_metrics$.estimate[1]
-pca_rej_rmse_std <- pca_rej_rmse/sd(weaving_test$Rejection)
-```
-
 Now, putting all of our calculated RMSEs into a table, we have:
 
 ```{r overall rmse table}
 rmse_df <- data.frame(
-  "Method" = c("Multiple Linear Regression", "Ridge Regression", "LASSO", "PCR"),
+  "Method" = c("Multiple Linear Regression", "Ridge Regression", "LASSO"),
   "Production RMSE" = c(paste(round(mlr_prod_rmse, 3), round(mlr_prod_rmse_std, 3), sep=" I "),
                         paste(round(ridge_prod_rmse, 3), round(ridge_prod_rmse_std, 3),  sep=" I "),
-                        paste(round(lasso_prod_rmse, 3), round(lasso_prod_rmse_std, 3),  sep=" I "),
-                        paste(round(pca_prod_rmse, 3), round(pca_prod_rmse_std, 3),  sep=" I ")),
+                        paste(round(lasso_prod_rmse, 3), round(lasso_prod_rmse_std, 3),  sep=" I ")),
   "Rejection RMSE" = c(paste(round(mlr_rej_rmse, 3), round(mlr_rej_rmse_std, 3),  sep=" I "),
                        paste(round(ridge_rej_rmse, 3), round(ridge_rej_rmse_std, 3),  sep=" I "),
-                       paste(round(lasso_rej_rmse, 3), round(lasso_rej_rmse_std, 3),  sep=" I "),
-                       paste(round(pca_rej_rmse, 3), round(pca_rej_rmse_std, 3),  sep=" I "))
+                       paste(round(lasso_rej_rmse, 3), round(lasso_rej_rmse_std, 3),  sep=" I "))
 )
 
 names(rmse_df) <- c("Method", "Production RMSE", "Rejection RMSE")
