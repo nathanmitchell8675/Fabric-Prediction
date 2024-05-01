@@ -1,0 +1,533 @@
+---
+title: "Predicting Weaving Production and Rejection: MLR, Ridge, LASSO, and PCR Methods"
+output: pdf_document
+date: "2024-02-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(rsample)
+library(leaps)
+library(knitr)
+library(glmnet)
+library(recipes)
+library(parsnip)
+library(tune)
+library(workflows)
+library(yardstick)
+library(ggplot2)
+library(kableExtra)
+library(MVN)
+library(car)
+```
+
+```{r load data}
+set.seed(478)
+weaving <- read.csv("weaving_rejection_dataset.csv")
+head(weaving) # 22010 x 14
+```
+
+We are removing certain variables from the dataset for various reasons. We remove "Construction" and "warp_count" as they have too many unique values to be very useful. We also remove "Previous_pdn" because, for each row in the dataset, the value is equal to "TOTAL" and therefore it's not helpful for analysis.
+
+```{r data prep}
+weaving <- weaving[,-c(6,1,11)]
+head(weaving)
+```
+
+Next, we rename some of the columns so that they don't contain symbols other than letters and underscores.
+
+```{r data prep 2}
+# Rename columns to use only letters and underscores
+names(weaving)[3] <- "Rec_Beam_Length_yds"
+names(weaving)[6] <- "Req_Beam_Length_yds"
+names(weaving)[7] <- "Total_Pdn_yds"
+head(weaving)
+```
+
+Now, we can take a look at the variables we are interested in predicting: Total Production and Rejection.
+
+```{r production histogram}
+ggplot(weaving, aes(x=Total_Pdn_yds)) + 
+  geom_histogram(fill="midnightblue", bins=35) +
+  labs(title="Distribution of Total Production", y="Count", x="Total Production (yds)") +
+  theme_light()
+```
+
+```{r rejection histogram}
+ggplot(weaving, aes(x=Rejection)) + 
+  geom_histogram(fill="darkgoldenrod3", bins=35) +
+  labs(title="Distribution of Rejection", y="Count", x="Number of Rejected Fabrics") +
+  theme_light()
+```
+
+They share a similar distribution, each having a heavy right skew. So, it may be challenging to accurately predict values for these variables, since they are far from being normal.
+
+Before we begin using linear methods of predicting Total Production and Rejection, we will check some assumptions. First, we will look at how closely our data follow a multivariate normal distribution:
+
+```{r mvn}
+# Take subset
+weaving_small <- weaving[sample(1:22010, 2000, replace=TRUE),]
+
+# Take continuous variables only
+X <- cbind(weaving_small$Req_Finish_Fabrics, weaving_small$Fabric_Allowance, weaving_small$Rec_Beam_Length_yds, weaving_small$Shrink_allow, weaving_small$Req_grey_fabric, weaving_small$Req_Beam_Length_yds, weaving_small$Total_Pdn_yds, weaving_small$Rejection)
+
+mvn_plot <- mvn(data = X, multivariatePlot = "qq", showOutliers = TRUE)
+```
+
+According to the QQ plot, we have a heavy right-skew: a severe violation of the multivariate normality assumption.
+
+Next, we will compare predicted and true values for both Total Production and Rejection using multiple linear regression models.
+
+```{r split data 1}
+weaving_split <- initial_split(weaving, prop = 0.75)
+weaving_train <- training(weaving_split)
+weaving_test <- testing(weaving_split)
+```
+
+```{r production residuals}
+mlr_prod <- lm(Total_Pdn_yds ~ ., data=weaving_train)
+pred <- predict(mlr_prod, newdata = weaving_test)
+actual <- weaving_test$Total_Pdn_yds
+residuals <- actual - pred
+resid_vs_fitted_prod <- data.frame(Residuals = residuals, Fitted = pred)
+ggplot(resid_vs_fitted_prod, aes(x=Fitted, y=Residuals)) +
+  geom_point() +
+  labs(title="Residuals vs Fitted Values (Total Production)") +
+  theme_light()
+```
+
+```{r rejection residuals}
+mlr_rej <- lm(Rejection ~ ., data=weaving_train)
+pred <- predict(mlr_rej, newdata = weaving_test)
+actual <- weaving_test$Rejection
+residuals <- actual - pred
+resid_vs_fitted_rej <- data.frame(Residuals = residuals, Fitted = pred)
+ggplot(resid_vs_fitted_rej, aes(x=Fitted, y=Residuals)) +
+  geom_point() +
+  labs(title="Residuals vs Fitted Values (Rejection)") +
+  theme_light()
+```
+
+Like with the Q-Q plot, we also see violation in the plots of residuals.
+
+Despite these severe violations, we can still continue with linear methods in the goal of prediction, but we won't be able to use inferential methods. This works out fine for the purpose of our project, considering that our primary goal is to develop better predictions for Total Production and Rejection.
+
+Now, preparing to start our analyses, we will standardize all of our predictor variables and split the data into training and testing subsets. We will use 75% of the data for training.
+
+```{r data prep 3}
+weaving_scaled <- as.data.frame(scale(weaving[, -c(7,8)]))
+weaving_scaled$Total_Pdn_yds <- weaving$Total_Pdn_yds
+weaving_scaled$Rejection <- weaving$Rejection
+head(weaving_scaled)
+```
+
+```{r split data 2}
+weaving_split <- initial_split(weaving_scaled, prop = 0.75)
+weaving_train <- training(weaving_split)
+weaving_test <- testing(weaving_split)
+```
+
+Looking at the correlation between Rejection and Total Production, we see a strong positive correlation. So, for our linear regression models, we will separate the two variables so that we aren't using one of them to help predict the other.
+
+```{r correlation}
+cor(weaving$Rejection, weaving$Total_Pdn_yds)
+```
+
+```{r data prep 4}
+weaving_prod <- weaving_scaled[, -11]
+weaving_rej <- weaving_scaled[, -10]
+```
+
+Now, we can again split the datasets into training and testing subsets for Production and Rejection. We will still be using 75% of the data for training.
+
+```{r split data 3}
+weaving_split_prod <- initial_split(weaving_prod, prop = 0.75)
+weaving_train_prod <- training(weaving_split_prod)
+weaving_test_prod <- testing(weaving_split_prod)
+
+weaving_split_rej <- initial_split(weaving_rej, prop = 0.75)
+weaving_train_rej <- training(weaving_split_rej)
+weaving_test_rej <- testing(weaving_split_rej)
+```
+
+Below we have our linear models: first to predict Total Production, and next to predict Rejection.
+
+```{r mlr prod}
+mlr_prod <- lm(Total_Pdn_yds ~ ., data=weaving_train)
+pred <- predict(mlr_prod, newdata = weaving_test)
+actual <- weaving_test$Total_Pdn_yds
+mlr_prod_rmse <- sqrt( sum( (pred-actual)^2 ) / length(actual) )
+mlr_prod_rmse_std <- mlr_prod_rmse/sd(weaving_test$Total_Pdn_yds)
+```
+
+```{r mlr rej}
+mlr_rej <- lm(Rejection ~ ., data=weaving_train)
+pred <- predict(mlr_rej, newdata = weaving_test)
+actual <- weaving_test$Rejection
+mlr_rej_rmse <- sqrt( sum( (pred-actual)^2 ) / length(actual) )
+mlr_rej_rmse_std <- mlr_rej_rmse/sd(weaving_test$Rejection)
+```
+
+Now, let's look into the multicollinearity of our predictors, first when predicting Production, then for predicting Rejection:
+
+```{r vif prod}
+vif_values_prod <- vif(mlr_prod)
+
+multicollinearity_table_prod <- data.frame(
+  "Predictor" = c("Req_Finish_Fabrics", "Fabric_Allowance", "Rec_Beam_Length", "Shrink_Allow", "Req_Grey_Fabric",
+                  "Req_Beam_Length", "Weft_Count", "EPI", "PPI"),
+  "VIF" = c(vif_values_prod[1], vif_values_prod[2], vif_values_prod[3],
+            vif_values_prod[4], vif_values_prod[5], vif_values_prod[6],
+            vif_values_prod[7], vif_values_prod[8], vif_values_prod[9]))
+
+rownames(multicollinearity_table_prod) <- NULL
+kable(multicollinearity_table_prod, booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+```{r vif rej}
+vif_values_rej <- vif(mlr_rej)
+
+multicollinearity_table_rej <- data.frame(
+  "Predictor" = c("Req_Finish_Fabrics", "Fabric_Allowance", "Rec_Beam_Length", "Shrink_Allow", "Req_Grey_Fabric",
+                  "Req_Beam_Length", "Weft_Count", "EPI", "PPI"),
+  "VIF" = c(vif_values_rej[1], vif_values_rej[2], vif_values_rej[3],
+            vif_values_rej[4], vif_values_rej[5], vif_values_rej[6],
+            vif_values_rej[7], vif_values_rej[8], vif_values_rej[9]))
+
+rownames(multicollinearity_table_rej) <- NULL
+kable(multicollinearity_table_rej, booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+Next, we will move on to Ridge and LASSO regression.
+
+```{r ridge production 1}
+prod_recipe <- recipe(Total_Pdn_yds ~ ., data = weaving_train)
+weaving_cv <- vfold_cv(weaving_train)
+
+# tuning
+lambda_range <- 10^seq(10, -2, length.out = 100)
+tune_df <- data.frame(lambda = lambda)
+
+# mixture = alpha
+ridge_spec <- linear_reg(mixture = 0, penalty = tune::tune("lambda")) |>
+  set_mode("regression") |>
+  set_engine("glmnet")
+
+ridge_tune <- workflow() |>
+  add_model(ridge_spec) |>
+  add_recipe(prod_recipe) |>
+  tune_grid(resamples = weaving_cv, grid = tune_df)
+
+ridge_tune |>
+  collect_metrics() |>
+  dplyr::select(lambda, .metric, mean) |>
+  pivot_wider(names_from = .metric, values_from = mean) |>
+  ggplot() +
+  geom_line(aes(lambda, rmse^2)) +
+  geom_point(aes(lambda, rmse^2)) +
+  coord_trans(x = "log10") +
+  labs(x="Lambda", y="MSE", title="Ridge Regression: Production") +
+  theme_light()
+```
+
+We will use `metric_set` here to help in calculating the RMSE and R^2 values.
+
+```{r set metrics}
+method_metrics <- metric_set(yardstick::rmse, rsq)
+```
+
+```{r ridge production 2}
+show_best(ridge_tune, metric = "rmse", n = 1) %>%
+  dplyr::select(-c(.estimator, .config)) %>%
+  kable(col.names=c("Lambda","Metric","Mean","n","SE"))
+
+ridge_wf <- workflow() |>
+  add_model(ridge_spec) |>
+  add_recipe(prod_recipe)
+ridge_final <- finalize_workflow(ridge_wf, select_best(ridge_tune, metric = 'rmse'))
+ridge_final_fit <- fit(ridge_final, data = weaving_train)
+
+pred <- predict(ridge_final_fit, new_data = weaving_test)
+
+ridge_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Total_Pdn_yds))
+
+ridge_metrics <- method_metrics(ridge_residuals, truth=Total_Pdn_yds, estimate=.pred) %>%
+  dplyr::select(-.estimator)
+
+ridge_prod_rmse <- ridge_metrics$.estimate[1]
+ridge_prod_rmse_std <- ridge_prod_rmse/sd(weaving_test$Total_Pdn_yds)
+```
+
+Now, repeating the process but predicting Rejection:
+
+```{r ridge rejection 1}
+rej_recipe <- recipe(Rejection ~ ., data = weaving_train)
+
+ridge_tune <- workflow() |>
+  add_model(ridge_spec) |>
+  add_recipe(rej_recipe) |>
+  tune_grid(resamples = weaving_cv, grid = tune_df)
+
+ridge_tune |>
+  collect_metrics() |>
+  dplyr::select(lambda, .metric, mean) |>
+  pivot_wider(names_from = .metric, values_from = mean) |>
+  ggplot() +
+  geom_line(aes(lambda, rmse^2)) +
+  geom_point(aes(lambda, rmse^2)) +
+  coord_trans(x = "log10") +
+  labs(x="Lambda", y="MSE", title="Ridge Regression: Rejection") +
+  theme_light()
+```
+
+```{r ridge rejection 2}
+show_best(ridge_tune, metric = "rmse", n = 1) %>%
+  dplyr::select(-c(.estimator, .config)) %>%
+  kable(col.names=c("Lambda","Metric","Mean","n","SE"))
+
+ridge_wf <- workflow() |>
+  add_model(ridge_spec) |>
+  add_recipe(rej_recipe)
+ridge_final <- finalize_workflow(ridge_wf, select_best(ridge_tune, metric = 'rmse'))
+ridge_final_fit <- fit(ridge_final, data = weaving_train)
+
+pred <- predict(ridge_final_fit, new_data = weaving_test)
+
+ridge_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Rejection))
+
+ridge_metrics <- method_metrics(ridge_residuals, truth=Rejection, estimate=.pred) %>%
+  dplyr::select(-.estimator)
+
+ridge_rej_rmse <- ridge_metrics$.estimate[1]
+ridge_rej_rmse_std <- ridge_rej_rmse/sd(weaving_test$Rejection)
+```
+
+```{r ridge table}
+ridge_table <- data.frame("Method" = "Ridge Regression",
+                          "Production RMSE" = paste(round(ridge_prod_rmse, 3), round(ridge_prod_rmse_std, 3), sep=" I "),
+                          "Rejection RMSE" = paste(round(ridge_rej_rmse, 3), round(ridge_rej_rmse_std, 3), sep=" I "))
+names(ridge_table) <- c("Method", "Production RMSE", "Rejection RMSE")
+kable(ridge_table, booktabs = T) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+
+Next, we will try using LASSO to predict Total Production and Rejection.
+
+```{r lasso production 1}
+lasso_spec <- linear_reg(mixture = 1, penalty = tune::tune("lambda")) |>
+  set_mode("regression") |>
+  set_engine("glmnet")
+
+lasso_tune <- workflow() |>
+  add_model(lasso_spec) |>
+  add_recipe(prod_recipe) |>
+  tune_grid(resamples = weaving_cv, grid = tune_df)
+
+lasso_tune |>
+  collect_metrics() |>
+  dplyr::select(lambda, .metric, mean) |>
+  pivot_wider(names_from = .metric, values_from = mean) |>
+  ggplot() +
+  geom_line(aes(lambda, rmse^2)) +
+  geom_point(aes(lambda, rmse^2)) +
+  coord_trans(x = "log10") +
+  labs(x="Lambda", y="MSE", title="LASSO: Production") +
+  theme_light()
+```
+
+```{r lasso production 2}
+show_best(lasso_tune, metric = "rmse", n = 1) %>%
+  dplyr::select(-c(.estimator, .config)) %>%
+  kable(col.names=c("Lambda","Metric","Mean","n","SE"))
+
+lasso_wf <- workflow() |>
+  add_model(lasso_spec) |>
+  add_recipe(prod_recipe)
+lasso_final <- finalize_workflow(lasso_wf, select_best(lasso_tune, metric = 'rmse'))
+lasso_final_fit <- fit(lasso_final, data = weaving_train)
+
+pred <- predict(lasso_final_fit, new_data = weaving_test)
+
+lasso_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Total_Pdn_yds))
+
+lasso_metrics <- method_metrics(lasso_residuals, truth=Total_Pdn_yds, estimate=.pred) %>%
+  dplyr::select(-.estimator)
+
+lasso_prod_rmse <- lasso_metrics$.estimate[1]
+lasso_prod_rmse_std <- lasso_prod_rmse/sd(weaving_test$Total_Pdn_yds)
+```
+
+```{r lasso rejection 1}
+lasso_spec <- linear_reg(mixture = 1, penalty = tune::tune("lambda")) |>
+  set_mode("regression") |>
+  set_engine("glmnet")
+
+lasso_tune <- workflow() |>
+  add_model(lasso_spec) |>
+  add_recipe(rej_recipe) |>
+  tune_grid(resamples = weaving_cv, grid = tune_df)
+
+lasso_tune |>
+  collect_metrics() |>
+  dplyr::select(lambda, .metric, mean) |>
+  pivot_wider(names_from = .metric, values_from = mean) |>
+  ggplot() +
+  geom_line(aes(lambda, rmse^2)) +
+  geom_point(aes(lambda, rmse^2)) +
+  coord_trans(x = "log10") +
+  labs(x="Lambda", y="MSE", title="LASSO: Rejection") +
+  theme_light()
+```
+
+```{r lasso rejection 2}
+show_best(lasso_tune, metric = "rmse", n = 1) %>%
+  dplyr::select(-c(.estimator, .config)) %>%
+  kable(col.names=c("Lambda","Metric","Mean","n","SE"))
+
+lasso_wf <- workflow() |>
+  add_model(lasso_spec) |>
+  add_recipe(rej_recipe)
+lasso_final <- finalize_workflow(lasso_wf, select_best(lasso_tune, metric = 'rmse'))
+lasso_final_fit <- fit(lasso_final, data = weaving_train)
+
+pred <- predict(lasso_final_fit, new_data = weaving_test)
+
+lasso_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Rejection))
+
+lasso_metrics <- method_metrics(lasso_residuals, truth=Rejection, estimate=.pred) %>%
+  dplyr::select(-.estimator)
+
+lasso_rej_rmse <- lasso_metrics$.estimate[1]
+lasso_rej_rmse_std <- lasso_rej_rmse/sd(weaving_test$Rejection)
+```
+
+```{r lasso table}
+lasso_table <- data.frame("Method" = "LASSO",
+                          "Production RMSE" = paste(round(lasso_prod_rmse, 3), round(lasso_prod_rmse_std, 3), sep=" I "),
+                          "Rejection RMSE" = paste(round(lasso_rej_rmse, 3), round(lasso_rej_rmse_std, 3), sep=" I "))
+names(lasso_table) <- c("Method", "Production RMSE", "Rejection RMSE")
+kable(lasso_table, booktabs = T) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+Now, we will move on to Principal Components Analysis.
+
+```{r pcr prod 1}
+tune_df <- data.frame(M = seq_len(ncol(weaving_train) - 1))
+
+prod_recipe_pca <- prod_recipe |>
+  step_pca(all_predictors(), num_comp = tune::tune("M"))
+
+linear_spec <- linear_reg()
+
+pca_workflow <- workflow() |>
+  add_model(linear_spec) |>
+  add_recipe(prod_recipe_pca)
+
+pca_tune <- pca_workflow |>
+  tune_grid(resamples = weaving_cv, grid = tune_df)
+
+pca_tune |>
+  collect_metrics() |>
+  dplyr::select(M, .metric, mean) |>
+  pivot_wider(names_from = .metric, values_from = mean) |>
+  ggplot() +
+  geom_line(aes(M, rmse^2)) +
+  geom_point(aes(M, rmse^2)) +
+  labs(x="M", y="MSE", title="PCR: MSE vs Number of Components") +
+  theme_light()
+```
+
+```{r pcr prod 2}
+show_best(pca_tune, metric = "rmse", n = 1) %>%
+  dplyr::select(-c(.estimator, .config)) %>%
+  kable(col.names=c("M","Metric","Mean","n","SE"))
+
+# Manually select 8 as the number of principal components to be used
+x <- select_best(pca_tune, metric="rmse")
+x[,1] <- 8
+pca_final <- finalize_workflow(pca_workflow, x)
+pca_final_fit <- fit(pca_final, data = weaving_train)
+
+pred <- predict(pca_final_fit, new_data = weaving_test)
+
+pca_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Total_Pdn_yds))
+
+pca_metrics <-  method_metrics(pca_residuals, truth=Total_Pdn_yds, estimate=.pred) %>%
+  dplyr::select(-.estimator)
+
+pca_prod_rmse <- pca_metrics$.estimate[1]
+pca_prod_rmse_std <- pca_prod_rmse/sd(weaving_test$Total_Pdn_yds)
+```
+
+```{r pcr rej 1}
+tune_df <- data.frame(M = seq_len(ncol(weaving_train) - 1))
+
+rej_recipe_pca <- rej_recipe |>
+  step_pca(all_predictors(), num_comp = tune::tune("M"))
+
+pca_workflow <- workflow() |>
+  add_model(linear_spec) |>
+  add_recipe(rej_recipe_pca)
+
+pca_tune <- pca_workflow |>
+  tune_grid(resamples = weaving_cv, grid = tune_df)
+
+pca_tune |>
+  collect_metrics() |>
+  dplyr::select(M, .metric, mean) |>
+  pivot_wider(names_from = .metric, values_from = mean) |>
+  ggplot() +
+  geom_line(aes(M, rmse^2)) +
+  geom_point(aes(M, rmse^2)) +
+  labs(x="M", y="MSE", title="PCR: MSE vs Number of Components") +
+  theme_light()
+```
+
+```{r pcr rej 2}
+show_best(pca_tune, metric = "rmse", n = 1) %>%
+  dplyr::select(-c(.estimator, .config)) %>%
+  kable(col.names=c("M","Metric","Mean","n","SE"))
+
+x <- select_best(pca_tune, metric="rmse")
+x[,1] <- 10
+pca_final <- finalize_workflow(pca_workflow, x)
+pca_final_fit <- fit(pca_final, data = weaving_train)
+
+pred <- predict(pca_final_fit, new_data = weaving_test)
+
+pca_residuals <- bind_cols(pred, weaving_test %>% dplyr::select(Rejection))
+
+pca_metrics <-  method_metrics(pca_residuals, truth=Rejection, estimate=.pred) %>%
+  dplyr::select(-.estimator)
+
+pca_rej_rmse <- pca_metrics$.estimate[1]
+pca_rej_rmse_std <- pca_rej_rmse/sd(weaving_test$Rejection)
+```
+
+Now, putting all of our calculated RMSEs into a table, we have:
+
+```{r overall rmse table}
+rmse_df <- data.frame(
+  "Method" = c("Multiple Linear Regression", "Ridge Regression", "LASSO", "PCR"),
+  "Production RMSE" = c(paste(round(mlr_prod_rmse, 3), round(mlr_prod_rmse_std, 3), sep=" I "),
+                        paste(round(ridge_prod_rmse, 3), round(ridge_prod_rmse_std, 3),  sep=" I "),
+                        paste(round(lasso_prod_rmse, 3), round(lasso_prod_rmse_std, 3),  sep=" I "),
+                        paste(round(pca_prod_rmse, 3), round(pca_prod_rmse_std, 3),  sep=" I ")),
+  "Rejection RMSE" = c(paste(round(mlr_rej_rmse, 3), round(mlr_rej_rmse_std, 3),  sep=" I "),
+                       paste(round(ridge_rej_rmse, 3), round(ridge_rej_rmse_std, 3),  sep=" I "),
+                       paste(round(lasso_rej_rmse, 3), round(lasso_rej_rmse_std, 3),  sep=" I "),
+                       paste(round(pca_rej_rmse, 3), round(pca_rej_rmse_std, 3),  sep=" I "))
+)
+
+names(rmse_df) <- c("Method", "Production RMSE", "Rejection RMSE")
+
+kable(rmse_df, booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+```
+
