@@ -209,7 +209,7 @@ weaving_cv <- vfold_cv(weaving_train)
 
 # tuning
 lambda_range <- 10^seq(10, -2, length.out = 100)
-tune_df <- data.frame(lambda = lambda)
+tune_df <- data.frame(lambda = lambda_range)
 
 # mixture = alpha
 ridge_spec <- linear_reg(mixture = 0, penalty = tune::tune("lambda")) |>
